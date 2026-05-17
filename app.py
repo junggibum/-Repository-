@@ -1,158 +1,172 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
-import numpy as np
+import yfinance as yf
+import requests
+from bs4 import BeautifulSoup
+from streamlit_autorefresh import st_autorefresh
+import plotly.graph_objects as go
+from datetime import datetime
 
-# 페이지 기본 설정
-st.set_page_config(layout="wide", page_title="나스닥 100 장기투자 스크리너")
+# 1. 최상단 배치 고정 (Streamlit 필수 규칙)
+st.set_page_config(page_title="The Arsenal v3.0", page_icon="🚀", layout="wide")
 
-# ==========================================
-# 1. 핵심 분석 함수들
-# ==========================================
+# ⏱️ 10초마다 자동 새로고침 가동
+st_autorefresh(interval=10000, limit=1000, key="data_refresh")
 
-# RSI(상대강도지수) 계산 함수
-def calculate_rsi(data, window=14):
-    delta = data['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+# 사이드바: 텔레그램 알림 설정 (개념적 인터페이스)
+with st.sidebar:
+    st.header("🚨 실시간 알림 센터")
+    st.toggle("텔레그램 알림 활성화", value=False)
+    st.text_input("Bot Token (비공개)", type="password")
+    st.info("알림 조건: 거래량 2배 폭발 or 52주 신고가 돌파")
 
-# 나스닥 100 티커 목록 자동 수집 (위키피디아)
-@st.cache_data(ttl=86400) # 24시간에 한 번만 실행
-def get_nasdaq_100_tickers():
-    try:
-        url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
-        tables = pd.read_html(url)
-        for table in tables:
-            if 'Ticker' in table.columns:
-                # 불필요한 공백 제거 및 리스트 변환
-                return [ticker.strip() for ticker in table['Ticker'].tolist()]
-    except Exception as e:
-        st.error("티커 목록을 가져오는 데 실패했습니다.")
-        # 실패 시 주요 대형주 위주로 백업 리스트 반환
-        return ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AVGO", "PEP", "COST"]
+st.title("🚀 통합 투자 무기: The Arsenal v3.0")
+st.markdown("---")
 
-# ==========================================
-# 2. 데이터 수집 및 캐싱 (가장 무거운 작업)
-# ==========================================
+col1, col2 = st.columns([1.2, 0.8])
 
-@st.cache_data(ttl=3600) # 1시간 동안 데이터 캐시 유지 (속도 최적화)
-def load_and_analyze_data(tickers):
-    results = []
-    
-    # 진행 상황을 보여주기 위한 프로그레스 바
-    progress_text = "나스닥 100 종목 데이터를 수집하고 분석 중입니다. (최초 1회 약 1~2분 소요)"
-    my_bar = st.progress(0, text=progress_text)
-    
-    total_tickers = len(tickers)
-    
-    for i, ticker in enumerate(tickers):
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-            hist = stock.history(period="6mo")
-            
-            if hist.empty:
-                continue
-                
-            # 기술적 지표 및 가격 위치 계산
-            hist['RSI'] = calculate_rsi(hist)
-            current_price = hist['Close'].iloc[-1]
-            current_rsi = hist['RSI'].iloc[-1]
-            
-            high_52w = info.get('fiftyTwoWeekHigh', hist['Close'].max())
-            low_52w = info.get('fiftyTwoWeekLow', hist['Close'].min())
-            
-            # 52주 바닥 대비 얼마나 올랐는지 (%)
-            if high_52w != low_52w:
-                price_pos = (current_price - low_52w) / low_52w * 100
-            else:
-                price_pos = 0
-                
-            # 재무 지표 추출
-            roe = info.get('returnOnEquity', 0)
-            roe = roe * 100 if roe is not None else 0
-            
-            fcf = info.get('freeCashflow', 0)
-            fcf = fcf if fcf is not None else 0
-            
-            results.append({
-                "티커": ticker,
-                "기업명": info.get('shortName', ticker),
-                "섹터": info.get('sector', 'N/A'),
-                "현재가 ($)": round(current_price, 2),
-                "ROE (%)": round(roe, 2),
-                "FCF (억$)": round(fcf / 100000000, 2), # 보기 쉽게 억 달러 단위로 변환
-                "RSI (14일)": round(current_rsi, 2),
-                "52주 바닥 대비 상승률 (%)": round(price_pos, 2)
-            })
-            
-        except:
-            pass # 일부 상장폐지되거나 오류나는 티커는 무시
-            
-        # 프로그레스 바 업데이트
-        my_bar.progress((i + 1) / total_tickers, text=f"{progress_text} ({i+1}/{total_tickers})")
-        
-    my_bar.empty() # 완료 후 프로그레스 바 삭제
-    return pd.DataFrame(results)
-
-# ==========================================
-# 3. 대시보드 UI 및 필터링 로직
-# ==========================================
-
-st.title("🦅 나스닥 100 장기투자 스크리너")
-st.markdown("**워런 버핏의 경제적 해자(재무)**와 **코스톨라니의 달걀 이론(과매도 심리)**을 결합하여 나스닥 최우량주 중 진흙 속의 진주를 찾습니다.")
-st.divider()
-
-# 데이터 로드
-tickers = get_nasdaq_100_tickers()
-df = load_and_analyze_data(tickers)
-
-# 필터 UI 레이아웃 구성
-st.subheader("⚙️ 스크리닝 조건 설정")
-col1, col2 = st.columns(2)
-
+# ====== [왼쪽: 미국 주식 성장주 엔진] ======
 with col1:
-    st.markdown("#### 🟢 버핏 필터 (안전마진 & 해자)")
-    min_roe = st.slider("최소 ROE (%)", min_value=0, max_value=50, value=15, step=5, 
-                        help="기업이 자본을 얼마나 효율적으로 굴리는지 나타냅니다. 보통 15% 이상이면 훌륭한 비즈니스 모델로 평가합니다.")
-    require_fcf = st.toggle("FCF(잉여현금흐름) 흑자 기업만 보기", value=True, 
-                            help="배당이나 재투자에 쓸 수 있는 진짜 현금이 회사에 들어오고 있는지 확인합니다.")
+    st.header("🇺🇸 US Growth & Chart")
+    
+    ticker_input = st.text_input("검증할 티커 입력 (예: NVDA, TSLA, PLTR)", "NVDA").upper()
+    
+    if ticker_input:
+        try:
+            stock = yf.Ticker(ticker_input)
+            
+            # 1. 캔들스틱 차트 구현 (Plotly)
+            hist = stock.history(period="60d")
+            
+            if not hist.empty:
+                fig = go.Figure(data=[go.Candlestick(
+                    x=hist.index,
+                    open=hist['Open'], high=hist['High'],
+                    low=hist['Low'], close=hist['Close'],
+                    name="주가"
+                )])
+                
+                # 이동평균선 추가 (20일) - 데이터가 충분할 때만 계산
+                if len(hist) >= 20:
+                    hist['MA20'] = hist['Close'].rolling(window=20).mean()
+                    fig.add_trace(go.Scatter(x=hist.index, y=hist['MA20'], line=dict(color='orange', width=2), name="MA20"))
+                
+                fig.update_layout(title=f"{ticker_input} 60일 캔들 차트", template="plotly_dark", height=450, margin=dict(l=0, r=0, t=30, b=0))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning(f"{ticker_input}의 주가 데이터를 찾을 수 없습니다.")
 
+            # 2. 실적 발표일 카운트다운 (안정성 강화)
+            try:
+                cal = stock.calendar
+                if cal is not None and not cal.empty:
+                    # 데이터 구조에 따라 'Earnings Date' 키 추출 방식 대응
+                    if 'Earnings Date' in cal.index:
+                        next_earnings = cal.loc['Earnings Date'].iloc[0]
+                    else:
+                        next_earnings = cal.iloc[0, 0]
+                        
+                    # datetime 객체인지 확인 후 연산
+                    if isinstance(next_earnings, datetime):
+                        days_left = (next_earnings.date() - datetime.now().date()).days
+                        st.info(f"📅 다음 실적 발표 예정일: **{next_earnings.date()}** (약 {days_left}일 남음)")
+                    else:
+                        st.info(f"📅 다음 실적 발표 예정일: **{next_earnings}**")
+                else:
+                    st.caption("실적 발표일 정보를 가져올 수 없습니다.")
+            except Exception:
+                st.caption("실적 발표 일정 로딩 실패 (yfinance API 제한)")
+
+            # 3. 공격적 성장 필터
+            info = stock.info
+            roe = (info.get('returnOnEquity') or 0) * 100
+            rev_growth = (info.get('revenueGrowth') or 0) * 100
+            
+            f1, f2 = st.columns(2)
+            f1.metric("ROE (버핏 기준 15%+)", f"{roe:.1f}%", delta=f"{roe-15:.1f}%")
+            f2.metric("매출 성장률 (공격 기준 20%+)", f"{rev_growth:.1f}%", delta=f"{rev_growth-20:.1f}%")
+            
+        except Exception as e:
+            st.error(f"데이터 오류: {ticker_input} 정보를 확인할 수 없습니다. (에러: {e})")
+
+# ====== [오른쪽: 국내 주식 수급 & 테마] ======
 with col2:
-    st.markdown("#### 🔵 코스톨라니 필터 (공포 심리 & 바닥 확인)")
-    max_rsi = st.slider("최대 RSI (과매도 지표)", min_value=10, max_value=100, value=40, step=5, 
-                        help="30 이하면 극단적인 과매도(대중의 공포) 구간을 의미합니다.")
-    max_price_pos = st.slider("52주 바닥 대비 최대 상승률 (%)", min_value=0, max_value=100, value=30, step=5, 
-                              help="현재 주가가 52주 최저가로부터 얼마나 떨어져 있는지 설정합니다. 낮을수록 바닥에 가깝습니다.")
+    st.header("🇰🇷 KR Momentum Radar")
+    
+    # 1. 네이버 증권 테마 상위 스캐너
+    st.subheader("🔥 당일 주도 테마 (Top 5)")
+    theme_url = "https://finance.naver.com/sise/theme.naver"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
+    try:
+        res = requests.get(theme_url, headers=headers)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        themes = soup.find_all('td', {'class': 'col_type1'})
+        changes = soup.find_all('td', {'class': 'col_type2'})
+        
+        theme_list = []
+        for i in range(min(5, len(themes))):
+            name = themes[i].text.strip()
+            change = changes[i].text.strip()
+            theme_list.append({"테마명": name, "상승률": change})
+            
+        if theme_list:
+            st.table(pd.DataFrame(theme_list))
+        else:
+            st.caption("현재 파싱 가능한 테마 데이터가 없습니다.")
+    except Exception:
+        st.caption("테마 데이터를 불러오는 중 오류 발생")
 
-# 데이터 필터링 적용
-filtered_df = df[
-    (df['ROE (%)'] >= min_roe) &
-    (df['RSI (14일)'] <= max_rsi) &
-    (df['52주 바닥 대비 상승률 (%)'] <= max_price_pos)
-]
+    st.markdown("---")
+    
+    # 2. 실시간 거래량 레이더 + 알림 로직
+    st.subheader("🚀 실시간 거래량 Top 10")
+    my_target = st.text_input("🚨 집중 감시 종목 (예: SK하이닉스)", "SK하이닉스")
+    
+    url = "https://finance.naver.com/sise/sise_quant.naver"
+    try:
+        response = requests.get(url, headers=headers)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        table = soup.find('table', {'class': 'type_2'})
+        
+        kr_data = []
+        if table:
+            # 빈 행이나 구분선 제외, 실제 데이터 행만 필터링하기 위해 'no' 클래스 검사 등 활용 가능
+            for row in table.find_all('tr'):
+                cols = row.find_all('td')
+                # 데이터가 확실히 있는 행만 타겟팅 (종목명과 거래량 인덱스 안정성 확보)
+                if len(cols) >= 6 and cols[1].find('a'): 
+                    name = cols[1].text.strip()
+                    volume = cols[5].text.strip()
+                    
+                    # 타겟 종목 포착 시 토스트 알림
+                    if name == my_target:
+                        st.toast(f"🚩 감시 종목 [{my_target}] 거래량 상위 진입!", icon="🚩")
+                        name = f"🚨 {name}"
+                    
+                    kr_data.append({"종목명": name, "거래량": volume})
+                    if len(kr_data) == 10: 
+                        break
+            
+            if kr_data:
+                st.dataframe(pd.DataFrame(kr_data), use_container_width=True, hide_index=True)
+            else:
+                st.caption("거래량 데이터를 찾을 수 없습니다.")
+        else:
+            st.error("테이블 구조를 로드하지 못했습니다.")
+    except Exception as e:
+        st.error(f"거래량 데이터를 가져오지 못했습니다. ({e})")
 
-if require_fcf:
-    filtered_df = filtered_df[filtered_df['FCF (억$)'] > 0]
-
-# 결과 출력
-st.divider()
-st.markdown(f"### 🎯 스크리닝 결과: 총 **{len(filtered_df)}** 종목 포착")
-
-if not filtered_df.empty:
-    # 인덱스 숨기고 테이블 출력
-    st.dataframe(
-        filtered_df.style.format({
-            "현재가 ($)": "{:,.2f}",
-            "ROE (%)": "{:.1f}%",
-            "FCF (억$)": "{:,.1f}",
-            "RSI (14일)": "{:.1f}",
-            "52주 바닥 대비 상승률 (%)": "{:.1f}%"
-        }),
-        use_container_width=True,
-        hide_index=True
-    )
-else:
-    st.info("💡 현재 설정한 가치 및 과매도 기준을 모두 만족하는 종목이 없습니다. 시장이 전체적으로 과열권이거나 조건이 너무 엄격할 수 있습니다. 슬라이더를 조정해 보세요.")
+    st.markdown("---")
+    
+    # 3. 매크로 미니 보드
+    st.subheader("🌍 매크로 퀵체크")
+    try:
+        vix_hist = yf.Ticker("^VIX").history(period="2d")
+        if not vix_hist.empty:
+            vix = vix_hist['Close'].iloc[-1]
+            st.metric("VIX 지수 (20미만 안정)", f"{vix:.2f}", delta="-안정" if vix < 20 else "+경계", delta_color="inverse")
+        else:
+            st.caption("VIX 지수를 가져올 수 없습니다.")
+    except Exception: 
+        st.caption("VIX 데이터를 불러오는 중 오류 발생")
